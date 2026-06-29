@@ -1,0 +1,130 @@
+# Portal-AI A2A — docker-compose.yml
+# Serwer: 10.112.32.19 (zamknięte środowisko, brak Internetu w runtime)
+# Wspólny nginx (poza tym compose) routuje ruch z zewnątrz do portów hosta poniżej —
+# patrz nginx/conf.d/portal-ai.conf.
+# Uruchomienie: docker compose up -d --build
+
+version: "3.9"
+
+networks:
+  a2a-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+
+# ── Sekrety budowania (pip.conf z JFrog) ──────────────────────────────────────
+secrets:
+  pip_conf:
+    file: /etc/pip.conf
+
+services:
+
+  postgres:
+    image: repo.bank.com.pl/zrai-docker-remote-dev/postgres:16-alpine
+    container_name: a2a-postgres
+    environment:
+      POSTGRES_DB: portal_ai
+      POSTGRES_USER: portal_ai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-portal_ai_password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - /etc/pki/tls/certs/ca-bundle.crt:/etc/pki/tls/certs/ca-bundle.crt:ro
+    networks: [a2a-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portal_ai -d portal_ai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  agent-registry:
+    build:
+      context: .
+      dockerfile: services/agent-registry/Dockerfile
+      secrets:
+        - pip_conf
+    container_name: a2a-agent-registry
+    environment:
+      AGENTS_CONFIG: /config/agents.yaml
+    volumes:
+      - ./config/agents.yaml:/config/agents.yaml:ro
+      - /etc/pki/tls/certs/ca-bundle.crt:/etc/pki/tls/certs/ca-bundle.crt:ro
+    ports:
+      - "${AGENT_REGISTRY_PORT:-8041}:8000"
+    networks: [a2a-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  orchestrator-agent:
+    build:
+      context: .
+      dockerfile: agents/orchestrator-agent/Dockerfile
+      secrets:
+        - pip_conf
+    container_name: a2a-orchestrator-agent
+    environment:
+      AGENT_ID: orchestrator-agent
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL_ORCHESTRATOR:-https://portal-ai.local/agents/orchestrator-agent}
+      AGENT_REGISTRY_URL: http://agent-registry:8000
+      TENANT_ID: ${TENANT_ID:-portal-ai}
+      APP_ID: ${APP_ID:-portal-ai}
+      A2A_TOKEN: ${A2A_TOKEN:-change_me}
+      A2A_ALLOWED_CALLERS: "*"
+      TASK_BACKEND: postgres
+      DATABASE_URL: postgresql://portal_ai:${POSTGRES_PASSWORD:-portal_ai_password}@postgres:5432/portal_ai
+    volumes:
+      - /etc/pki/tls/certs/ca-bundle.crt:/etc/pki/tls/certs/ca-bundle.crt:ro
+    ports:
+      - "${ORCHESTRATOR_PORT:-8042}:8000"
+    networks: [a2a-net]
+    depends_on:
+      agent-registry:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  rag-agent:
+    build:
+      context: .
+      dockerfile: agents/rag-agent/Dockerfile
+      secrets:
+        - pip_conf
+    container_name: a2a-rag-agent
+    environment:
+      AGENT_ID: rag-agent
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL_RAG:-https://portal-ai.local/agents/rag-agent}
+      A2A_TOKEN: ${A2A_TOKEN:-change_me}
+      A2A_ALLOWED_CALLERS: "*"
+      TASK_BACKEND: postgres
+      DATABASE_URL: postgresql://portal_ai:${POSTGRES_PASSWORD:-portal_ai_password}@postgres:5432/portal_ai
+      # Istniejący serwis RAG (rag-module) wołany jako narzędzie (rola MCP), nie jako agent A2A.
+      # Przykład: http://10.112.32.19:8011/rag/chat (rag-gateway z modułu rag-module).
+      RAG_BACKEND_URL: ${RAG_BACKEND_URL:-}
+      RAG_TENANT_ID: ${RAG_TENANT_ID:-portal-ai}
+      RAG_APP_ID: ${RAG_APP_ID:-a2a-rag-agent}
+      RAG_KNOWLEDGE_BASE_ID: ${RAG_KNOWLEDGE_BASE_ID:-default}
+    volumes:
+      - /etc/pki/tls/certs/ca-bundle.crt:/etc/pki/tls/certs/ca-bundle.crt:ro
+    ports:
+      - "${RAG_AGENT_PORT:-8043}:8000"
+    networks: [a2a-net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
