@@ -41,19 +41,43 @@ wynik i zwraca go jako swój własny artifact. `rag-agent` ma skill `rag.search`
 woła **istniejący serwis RAG** (np. `rag-module`/`rag-gateway`) jako narzędzie —
 to jest granica MCP, nie A2A.
 
-## Uruchomienie
+## Pierwsze uruchomienie na serwerze
+
+### 1. Przygotuj `.env`
 
 ```bash
+cd a2a-protocol
 cp .env.example .env
-# uzupełnij A2A_TOKEN, PUBLIC_BASE_URL_*, RAG_BACKEND_URL (opcjonalnie)
-docker compose up -d --build
 ```
 
-Wymaga na hosту `/etc/pip.conf` (JFrog) i CA bundle w
-`/etc/pki/tls/certs/ca-bundle.crt` — tak jak inne aplikacje na `10.112.32.19`
-(patrz `rag-module`).
+Minimalnie ustaw/sprawdź:
+- `A2A_TOKEN` — wspólny sekret (zmień z `change_me`)
+- Porty `AGENT_REGISTRY_PORT` / `ORCHESTRATOR_PORT` / `RAG_AGENT_PORT` (domyślnie
+  `8041`/`8042`/`8043`) — sprawdź, że są wolne: `ss -tulpn | grep -E '8041|8042|8043'`
+- `RAG_BACKEND_URL` można na razie zostawić puste — `rag-agent` wtedy odpowiada
+  deterministycznym stubem (do pierwszego testu wystarczy, nie potrzebujesz
+  uruchomionego `rag-module`)
 
-Sprawdzenie:
+### 2. Sprawdź wymagane pliki na hoście (build + CA trust)
+
+```bash
+ls -la /etc/pip.conf
+ls -la /etc/pki/tls/certs/ca-bundle.crt
+```
+
+Jeśli budowałeś już `rag-module` na tym serwerze, powinny tam być.
+
+### 3. Postaw kontenery
+
+```bash
+docker compose up -d --build
+docker compose ps
+```
+
+Wszystkie 4 serwisy (`postgres`, `agent-registry`, `orchestrator-agent`, `rag-agent`)
+powinny być `healthy`/`running`. W razie problemu: `docker compose logs -f <serwis>`.
+
+### 4. Health check
 
 ```bash
 curl http://localhost:8041/health   # agent-registry
@@ -61,7 +85,32 @@ curl http://localhost:8042/health   # orchestrator-agent
 curl http://localhost:8043/health   # rag-agent
 ```
 
-### Integracja z wspólnym nginx
+### 5. Zobacz A2A w akcji (bez nginx, na portach hosta)
+
+```bash
+# Agent Card
+curl http://localhost:8043/.well-known/agent-card.json | jq
+
+# Wyślij task
+curl -s -X POST http://localhost:8043/a2a/jsonrpc \
+  -H "Content-Type: application/json" \
+  -H "X-Agent-Id: orchestrator-agent" -H "X-Agent-Token: <TWÓJ_A2A_TOKEN>" -H "X-Tenant-Id: bgk" \
+  -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{
+    "skill":"rag.search",
+    "message":{"role":"user","parts":[{"type":"text","text":"Test A2A na serwerze"}]},
+    "metadata":{"tenant_id":"bgk"}
+  }}' | jq
+
+# Sprawdź status (zobaczysz przejście submitted -> working -> completed,
+# stub celowo "myśli" ~1.5s)
+curl -s http://localhost:8043/a2a/tasks/<TASK_ID> \
+  -H "X-Agent-Id: orchestrator-agent" -H "X-Agent-Token: <TWÓJ_A2A_TOKEN>" -H "X-Tenant-Id: bgk" | jq
+```
+
+Pełną listę gotowych przykładów (cancel, SSE, delegacja orchestrator -> rag-agent)
+znajdziesz w sekcji [Przykładowe curle](#przykładowe-curle) poniżej.
+
+### 6. Podłącz pod wspólny nginx
 
 Ten projekt **nie** stawia własnego nginx — wkleja się do istniejącego, wspólnego
 reverse proxy (`portal-ai-nginx`), tak jak inne moduły (np. `rag-module`).
@@ -72,8 +121,18 @@ reverse proxy (`portal-ai-nginx`), tak jak inne moduły (np. `rag-module`).
 docker exec portal-ai-nginx nginx -s reload
 ```
 
-Po tym agenci są dostępni pod `https://portal-ai.local/agents/orchestrator-agent/...`
-i `https://portal-ai.local/agents/rag-agent/...`.
+Po tym agenci są dostępni jako kolejny serwis pod wspólnym adresem, obok
+pozostałych modułów (np. `rag-module`):
+
+```
+https://portal-ai.local/agents/orchestrator-agent/.well-known/agent-card.json
+https://portal-ai.local/agents/rag-agent/.well-known/agent-card.json
+```
+
+Zweryfikuj dokładnie tymi samymi curlami co w kroku 5, tylko zamieniając
+`http://localhost:<port>` na `https://portal-ai.local/agents/<agent>` — jeśli
+odpowiedzi się zgadzają, A2A działa już przez wspólny nginx tak samo jak każdy
+inny serwis w Portal-AI.
 
 ## Przykładowe curle
 
